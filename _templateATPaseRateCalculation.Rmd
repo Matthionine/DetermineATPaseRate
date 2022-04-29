@@ -1,0 +1,398 @@
+---
+title: "Template for ATPase rate calculation (using rollapply)"
+author: "Todo"
+date: 'Todo'
+output: html_notebook
+
+---
+
+# Background
+`rollapply` is a function that allows to apply a function to a rolling window within a data set.
+Since finding a good region of the NADH measurements to determine the slope manually is difficult and time intensive, using roll apply provides a fast solution to semi-automate that task.
+The function `rollapply` is used to calculate the slope of a rolling window of the NADH measurements.
+Afterwards, the region where the slopes display a plateau of minimal values is selected and an average slope is calculated to determine the steepest part of the graph.
+The slope of each well is then used to calculate the ATPase rate of the respective sample (well).
+
+```{r setup}
+knitr::opts_chunk$set(echo = FALSE)
+library(tidyverse)
+library(magrittr)
+library(ggplot2)
+library(rbokeh)
+library(RColorBrewer)
+library(openxlsx)
+library(zoo)
+
+theme_set(theme_minimal())
+theme_update(panel.grid = element_line(colour = "gray88"))
+palette("Dark2")
+metaData <- list(experimentId = "todo", 
+                 LonConc = 0.05,
+                 SubstrateRefConc = 2, 
+                 comment = "5 mM PEP, 0.2 mM NADH")
+
+
+
+###
+# define some functions used later
+# returns the labels saved in the vector columns based on the given vector of names (= wells)
+getLabels <- function(elements) {
+  ret <- list()
+  
+  for (elem in elements) {
+    ret %<>% append(values = columns[elem])
+  }
+  
+  return(ret)
+}
+
+
+# returns all wells of a certain sample (using the columns vector)
+getWells <- function(sampleName = "blank") {
+  ret <- c()
+  
+  for (element in names(columns)) {
+    if (tolower(columns[element]) == tolower(sampleName)) {
+      ret %<>% append(values = element)
+    }
+  }
+  
+  return(ret)
+}
+
+```
+
+
+# Setup
+## samples
+<!-- todo: specify samples measured -->
+Check (1× = 2µM):
+
+* List of samples
+
+## Conditions
+
+<!-- todo: update conditions -->
+* 1× Lon reaction buffer
+* 10% Glycerol
+* 1 mM DTT
+* 2 mM ATP
+* 5 mM PEP
+* 0.2 mM NADH
+* 10 U PK/LDH
+* 0.05 µM Lon-His
+* x µM Substrate
+
+# Determining ATPase rate
+
+## Load data
+
+The NADH absorption at 340 nm was measured in a Tecan Spark platereader.
+In addition, an initial measurement of the absorptions at 900 nm and  1000 nm was conducted at the beginning to normalize the absorption measurments to a path length of 1 cm. 
+The measured values are then exported to an Excel file (.xlsx) and the various wavelength are split manually into separate sheets.
+That file of measurments is loaded here, "s" and " °C" is removed from columns time and temp, respectively and converted into numbers.
+
+```{r loadData, echo=FALSE}
+
+columns <- c(
+  "time" = "time",
+  "temp" = "temp",
+  "H1" = "todo",
+  "H2" = "todo",
+  "H3" = "todo",
+  "H4" = "todo",
+  "H5" = "todo",
+  "H6" = "todo",
+  "H7" = "todo",
+  "H8" = "todo",
+  "H9" = "todo",
+  "H10" = "todo",
+  "H11" = "todo",
+  "H12" = "todo"
+)
+fileLocation <- "../measurement/file.xlsx"
+
+abs340 <- read.xlsx(xlsxFile = fileLocation, sheet = "NADH (340nm)") 
+abs1000 <- read.xlsx(xlsxFile = fileLocation, sheet = "TestWL (1000nm)")
+abs900 <- read.xlsx(xlsxFile = fileLocation, sheet = "RefWL (900nm)")
+
+
+abs340$time %<>% gsub(pattern = "s", replacement = "") %>% 
+  as.integer()
+abs340$temp %<>% gsub(pattern = "°C", replacement = "") %>%
+  as.numeric()
+  
+head(abs340)
+abs1000
+abs900
+```
+
+## Raw data
+
+Raw data as obtained from the machine.
+
+```{r plotRaw, fig.width=10}
+abs340 %>% 
+  pivot_longer(cols = !time:temp,
+               names_to = "sample",
+               values_to = "abs340") %>% 
+  ggplot(aes(y=abs340, x=time, col=sample)) +
+  geom_line() +
+  ## uncomment to show points in addition to line
+  # geom_point() +
+  scale_y_continuous() + 
+  # scale_x_continuous(n.breaks = 8) +
+  expand_limits(x=c(0, 0.7), y=0) +
+  labs(x = "time [s]", y = expression("Absorbance"["340nm"]), title = "Raw data") +
+  facet_wrap(vars(sample), labeller = as_labeller(columns))
+
+```
+
+
+## Normalized data
+
+```{r normalizeData, fig.width=10}
+# Test wave length: 1000nm
+# Reference wave length: 900
+# Measured in a 1 cm cuvette in a spectrophotometer (Vis V-1200 from VWR) using the buffer stated above.
+TestWl1cm <- c(0.226, 0.225, 0.224)
+RefWl1cm <- c(0.078, 0.077, 0.078)
+#calculating the K-factor
+kFactor <- mean(TestWl1cm) - mean(RefWl1cm)
+
+
+# caluclate the path length corrected values
+abs340Corrected <- abs340 
+dataCols2 <- abs340Corrected  %>%
+  select(!time & !temp) %>%
+  colnames()
+abs340Corrected[dataCols2] <- mapply("*", 
+                                 abs340Corrected[dataCols2],
+                                 kFactor / (abs1000[dataCols2] - abs900[dataCols2]))
+
+
+# subtract the blank and remove the blank from the dataset
+abs340Corrected %<>% 
+  mutate(blank = rowMeans(select(., all_of(getWells("blank"))))) %>%
+  pivot_longer(names_to = "well", values_to = "abs340", cols = matches("^[A-H][1-9][012]?$")) %>%
+  mutate(abs340 = abs340 - blank) %>%
+  filter(!well %in% getWells("blank")) %>% 
+  mutate(label = getLabels(well))
+
+# plot normalized data
+abs340Corrected %>%
+  ggplot(aes(x = time/60, y = abs340, col = well)) +
+  geom_line() +
+  # Formatting
+  scale_y_continuous() +
+  scale_x_continuous(n.breaks = 6) +
+  expand_limits(x=c(0, 0.7), y=0) +
+  # Labels
+  labs(x = "time [min]", 
+       y = expression("normalized absorbance"["340nm"]),
+       title = "normalized Absorption") +
+  facet_wrap(~ well, labeller = as_labeller(columns))
+```
+
+
+## Fit and plot slope
+The normalized data is then used to fit the slopes within a window of sequential data points.
+In case of a continuous degradation the slopes should plateau for a bit until the reaction stops.
+At that point the slopes will quickly increase to 0 and stay there.
+Usually, a window of 40 is a good window with to smooth out noise, while still capturing the shape of the curve.
+In some cases, the reaction runs so fast, that a window of 40 data points spans past the end of the reaction.
+In those cases, the window needs to be shorter (20 or even 10).
+
+In a second step, the range containing the plateau in the beginning is chosen and used to calculate the average slope within that range.
+
+```{r fitSlope, fig.width=10}
+fittingWindow <- 40
+fittingFunction <- function(absorption, time_s) {
+  fittingLimit <- fittingWindow/2
+  # absorption has the indexes according to the row number --> use those to find the correct times
+  timeRange <- absorption %>%
+    names() %>%
+    as.integer()
+  
+  if (length(timeRange) <= fittingLimit) {
+    ret <- list(c("(Intercept)" = 0, "time_s" = 0))
+  } else {
+    ret <-
+      tibble(absorption = absorption, time_s = time_s[timeRange]) %>%
+      lm(formula = absorption ~ time_s)
+  }
+  
+  ret %>%
+    return()
+}
+
+abs340Corrected %<>% 
+  group_by(well) %>%
+  mutate(fit = rollapply(abs340, time, width = fittingWindow, partial = TRUE,
+                            FUN = fittingFunction,
+                            by.column = FALSE, align = "left"
+                            ),
+         windowWidth = fittingWindow) %>%
+   mutate(slope = sapply(fit[,1], function(x){x[2]}))
+
+## In some cases with a quick reaction the window needs to be reduced to 20 or 
+## even 10 data points to be able to capture the slope.
+## In those cases uncomment this section and do fitting again with shorter window.
+# fittingWindow <- 20
+# abs340Corrected[abs340Corrected$well %in% c("todo"),] %<>% 
+#   group_by(well) %>%
+#   mutate(fit = rollapply(abs340, time, width = fittingWindow, partial = TRUE,
+#                             FUN = fittingFunction,
+#                             by.column = FALSE, align = "left"
+#                             ),
+#          windowWidth = fittingWindow) %>%
+#    mutate(slope = sapply(fit[,1], function(x){x[2]}))
+
+```
+
+```{r AvgSlopeRange, fig.width=10}
+###
+# Define the range of relevant slopes that should be used to calculate the average Slope
+# todo: define ranges for calculation of the average slope
+ranges <-  tribble(
+  ~well, ~lower, ~upper,
+  "H1", 0, 4300,
+  "H2", 0, 4300,
+  "H3", 0, 4300,
+  "H4", 0, 4300,
+  "H5", 0, 4300,
+  "H6", 0, 4300,
+  "H7", 0, 4300,
+  "H8", 0, 4300,
+  "H9", 0, 4300,
+  "H10", 0, 4300,
+  "H11", 0, 4300,
+  "H12", 0, 4300
+)
+
+
+###
+# plot the slope with the selected ranges
+# filtering time allows a detailed look at a certain range.
+plotSlope <- abs340Corrected %>% 
+#  filter(time < 1500) %>%
+  ggplot(aes(x = time, y = slope, col = well)) +
+  geom_line() +
+  expand_limits(y = c(0)) +
+  facet_wrap(~well, scale = "free_x") +
+  geom_vline(data = ranges,
+             mapping = aes(xintercept = lower),
+             color = "red",
+             size = .1)+
+  geom_vline(data = ranges,
+             mapping = aes(xintercept = upper),
+             color = "red",
+             size = .1) +
+  labs(x = "time [s]", y = "slope")
+plotSlope
+
+plotAbs <- abs340Corrected %>% 
+  ggplot(aes(x = time, y = abs340, col = well)) +
+  geom_line() +
+  expand_limits(y = c(0)) +
+  facet_wrap(~well) +
+  geom_vline(data = ranges,
+             mapping = aes(xintercept = lower),
+             color = "red",
+             size = .1) +
+  geom_vline(data = ranges,
+             mapping = aes(xintercept = upper + (fittingWindow * 16)),
+             color = "red",
+             size = .1) +
+  labs(x = "time [s]", y = "normalized absorption [340nm]")
+plotAbs
+
+```
+
+
+## Average Slope
+
+The average slope in the defined region is calculated.
+Afterwards, the curve including a horizontal line indicating the average slope is plotted.
+
+```{r calcAvgSlope, fig.width=10}
+rates <- abs340Corrected %>%
+  left_join(ranges, by = "well") %>%
+  filter(lower <= time, time <= upper) %>%
+  group_by(well) %>%
+  summarise(across(slope, list(mean = mean, median = median), .names = "{.fn}_{.col}"),
+            across(windowWidth, list(min = min, max = max), .names = "{.fn}_{.col}"))
+
+plotSlope +
+  geom_hline(data = rates,
+             mapping = aes(yintercept = mean_slope),
+             color = "black",
+             size = .2)
+```
+
+
+
+## Calculating the ATPase rates
+
+Now, use the formula to calculate the ATPase rates:
+
+$$r(ATPase) = \frac{1}{\epsilon(NADH) * c(ATPase) * d} * \frac{d(A{340nm})}{dt}$$
+
+Where:
+
+* $\epsilon(NADH) = 6.220*10^3 M^{-1} cm^{-1}$ This is the extinction coefficient of NADH
+* $c(ATPase)$ is the concentration of hexameric Lon used (in M)
+* $d = 1cm$ (the path length that we normalized to 1cm)
+* $\frac{d(A{340nm})}{dt}$ being the slope of the curve per **min**
+
+In our case the slopes are in s^-1^ and need to be converted to min^-1^
+
+```{r calcATPaseRates}
+# conversion factor from s^-1 to min^-1 for the slope
+convSL <- 60
+# epsilon(NADH) (in M^-1 cm^-1)
+eNADH <- 6220
+# Lon concentration conversion from µM to M
+convLon <- (1 / 1000) / 1000
+# path length in cm
+pathlength <- 1
+
+
+rates %<>%
+  mutate(ATPaseRate = (-mean_slope) * convSL * 1 / (eNADH * metaData[["LonConc"]] * convLon * pathlength)) %>% 
+  mutate(labs = columns[well])
+
+
+rates %>%
+  ggplot(aes(x = well, y = ATPaseRate, fill = labs)) +
+  geom_col(color = "black", size = .2)  +
+  scale_fill_brewer(palette = "Paired")
+```
+
+Finally, we need to first subtract the value of "NADH only" from all others and then the value of "PK/LDH".
+Doing that, we get the ATPase rate of the respective sample.
+
+```{r ATPaseRates}
+
+rates %<>% 
+  #set experiment number
+  mutate(experiment = experimentId,
+         comment = metaData[["comment"]],
+         Lon.conc = metaData[["LonConc"]]) %>%
+  # subtract basal PK/LDH activity from ATPase rates 
+  # (as this also includes the basal NADH oxidation rate, subtracting the NADH sample from the others can be skipped)
+  mutate(ATPaseRate_pkldh = ATPaseRate - mean(ATPaseRate[.$well %in% getWells(sampleName = "PK/LDH")]))
+
+
+# plot actual ATPase rates
+rates %>%
+  ggplot(aes(x = well, y = ATPaseRate_pkldh, fill = labs)) +
+  geom_col(color = "black", size = .2) +
+  scale_fill_brewer(palette = "Paired")
+
+# select all except NAHD and PK/LDH
+rates %>%
+  select(labs, well, ATPaseRate_pkldh, Lon.conc, experiment, comment, min_windowWidth) %>%
+  filter(!tolower(labs) %in% c("nadh", "pk/ldh")) %>%
+  write.xlsx(file = paste0("./out-ATPaseRates-", metaData[["experimentId"]], ".xlsx"), overwrite = TRUE)
+```
